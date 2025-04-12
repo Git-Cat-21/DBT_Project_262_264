@@ -71,7 +71,46 @@ sudo apt install postgresql
 ```
 </details>
 
+## Create a virtual environment
+```bash
+python3 -m venv venv
+source ./venv/bin/activate
+```
+
 ## Install Dependencies
 ```bash
 pip3 install -r requirements.txt
+```
+## Run the data.sql script
+
+<details>
+<summary>PostgreSQL Database Setup Instructions for VSC</summary>
+
+#### 1. Install Database Client
+Recommended extension for VS Code:
+- **Name**: Database Client JDBC
+- **VS Marketplace Link**: [Database Client JDBC](https://marketplace.visualstudio.com/items?itemName=cweijan.dbclient-jdbc)
+
+#### 2. Connect to PostgreSQL Database
+Select PostgreSQL and use credentials to connect:
+
+```properties
+Host: localhost 
+Port: 5432 
+Username: your_username
+Password: your_password
+```
+
+#### 3. Run the data.sql script
+
+</details>
+
+## Terminal 1
+```bash
+python3 consumer.py
+```
+
+## Terminal 2
+```bash
+python3 producer.py
 ```
