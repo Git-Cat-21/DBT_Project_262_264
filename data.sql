@@ -40,3 +40,17 @@ SELECT * FROM positive;
 SELECT * FROM negative;
 
 SELECT * FROM neutral;
+
+
+--
+
+
+SELECT * FROM   tweets ;
+
+SELECT * FROM  sentiment_summary;
+
+SELECT * FROM  popular_users;
+
+SELECT * FROM  hourly_sentiment;
+
+SELECT * FROM performance_metrics;
