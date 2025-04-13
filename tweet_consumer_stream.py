@@ -4,72 +4,79 @@ import time
 import schedule
 from datetime import datetime
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf
+from pyspark.sql.functions import udf, col
 from pyspark.sql.types import StringType, FloatType, StructType, StructField
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import nltk
 import psycopg2
-from psycopg2 import sql
+import psutil
+import os
+from dotenv import load_dotenv
 
-# Download VADER lexicon
+load_dotenv()
+
+class PerformanceMonitor:
+    def __init__(self):
+        self.start_time = None
+        self.cpu_usage = []
+        self.memory_usage = []
+    
+    def start(self):
+        self.start_time = time.time()
+        self.cpu_usage = []
+        self.memory_usage = []
+    
+    def record(self):
+        self.cpu_usage.append(psutil.cpu_percent())
+        self.memory_usage.append(psutil.virtual_memory().percent)
+    
+    def get_metrics(self):
+        return {
+            "execution_time": time.time() - self.start_time,
+            "avg_cpu": sum(self.cpu_usage)/max(1, len(self.cpu_usage)),
+            "max_cpu": max(self.cpu_usage) if self.cpu_usage else 0,
+            "avg_memory": sum(self.memory_usage)/max(1, len(self.memory_usage)),
+            "max_memory": max(self.memory_usage) if self.memory_usage else 0,
+            "timestamp": datetime.now().isoformat()
+        }
+
+monitor = PerformanceMonitor()
+
 nltk.download('vader_lexicon')
-
-# Initialize Spark Session
 spark = SparkSession.builder \
     .appName("Twitter Sentiment Analysis") \
     .config("spark.jars", "postgresql-42.6.0.jar") \
     .getOrCreate()
 
-# Define schema for the Twitter data
 schema = StructType([
-    StructField("Tweet_ID", StringType(), True),
-    StructField("Username", StringType(), True),
-    StructField("Text", StringType(), True),
-    StructField("Retweets", StringType(), True),
-    StructField("Likes", StringType(), True),
-    StructField("Timestamp", StringType(), True),
-    StructField("compound_score", FloatType(), True),
-    StructField("sentiment", StringType(), True)
+    StructField("Tweet_ID", StringType()),
+    StructField("Username", StringType()),
+    StructField("Text", StringType()),
+    StructField("Retweets", StringType()),
+    StructField("Likes", StringType()),
+    StructField("Timestamp", StringType())
 ])
 
-# Initialize VADER sentiment analyzer
 sid = SentimentIntensityAnalyzer()
 
-# UDF for sentiment analysis
 def analyze_sentiment(text):
-    if text is None:
-        return 0.0
-    return sid.polarity_scores(text)['compound']
+    return sid.polarity_scores(text or "")['compound']
 
-def get_sentiment_label(compound_score):
-    if compound_score >= 0.05:
-        return 'POSITIVE'
-    elif compound_score <= -0.05:
-        return 'NEGATIVE'
-    else:
-        return 'NEUTRAL'
-
-# Register UDFs
 sentiment_udf = udf(analyze_sentiment, FloatType())
-sentiment_label_udf = udf(get_sentiment_label, StringType())
+sentiment_label_udf = udf(lambda x: 'POSITIVE' if x >= 0.05 else ('NEGATIVE' if x <= -0.05 else 'NEUTRAL'), StringType())
 
-# PostgreSQL connection parameters
+
 db_params = {
     "host": "localhost",
-    "database": "twitterdb",
-    "user": "user",
-    "password": "password"
+    "database": os.getenv("DB_NAME"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD")
 }
 
 def create_tables():
-    """Create tables with batch tracking columns"""
-    conn = None
-    try:
-        conn = psycopg2.connect(**db_params)
-        cursor = conn.cursor()
-        
-        # Tweets table (unchanged)
-        cursor.execute('''
+    """Initialize all required tables with proper constraints"""
+    commands = (
+        """
         CREATE TABLE IF NOT EXISTS tweets (
             tweet_id TEXT PRIMARY KEY,
             username TEXT,
@@ -80,277 +87,304 @@ def create_tables():
             compound_score FLOAT,
             sentiment TEXT
         )
-        ''')
-        
-        # Modified: Sentiment summary now includes batch_id
-        cursor.execute('''
+        """,
+        """
         CREATE TABLE IF NOT EXISTS sentiment_summary (
             id SERIAL PRIMARY KEY,
-            batch_id TEXT,  -- New: Unique identifier for each batch run
-            sentiment TEXT,
+            batch_id TEXT NOT NULL,
+            sentiment TEXT NOT NULL,
             count INTEGER,
             percentage FLOAT,
-            recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(batch_id, sentiment)
         )
-        ''')
-        
-        
-        
-        # Modified: Popular users with batch_id
-        cursor.execute('''
+        """,
+        """
         CREATE TABLE IF NOT EXISTS popular_users (
             id SERIAL PRIMARY KEY,
-            batch_id TEXT,  -- New
-            username TEXT,
+            batch_id TEXT NOT NULL,
+            username TEXT NOT NULL,
             avg_sentiment FLOAT,
             total_tweets INTEGER,
             total_engagement INTEGER,
-            recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(batch_id, username)
         )
-        ''')
-        
-        # New: Table for hourly trends (if using the 3rd query)
-        cursor.execute('''
+        """,
+        """
         CREATE TABLE IF NOT EXISTS hourly_sentiment (
             id SERIAL PRIMARY KEY,
-            batch_id TEXT,
-            hour TIMESTAMP,
-            sentiment TEXT,
+            batch_id TEXT NOT NULL,
+            hour TIMESTAMP NOT NULL,
+            sentiment TEXT NOT NULL,
             count INTEGER,
             avg_score FLOAT,
-            recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(batch_id, hour, sentiment)
         )
-        ''')
-        
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS performance_metrics (
+            id SERIAL PRIMARY KEY,
+            batch_interval INTEGER NOT NULL,
+            execution_time FLOAT NOT NULL,
+            avg_cpu FLOAT NOT NULL,
+            max_cpu FLOAT NOT NULL,
+            avg_memory FLOAT NOT NULL,
+            max_memory FLOAT NOT NULL,
+            record_count INTEGER NOT NULL,
+            timestamp TIMESTAMP NOT NULL
+        )
+        """
+    )
+    
+    conn = None
+    try:
+        conn = psycopg2.connect(**db_params)
+        cursor = conn.cursor()
+        for command in commands:
+            cursor.execute(command)
         conn.commit()
     except Exception as e:
         print(f"Database error: {e}")
     finally:
         if conn:
             conn.close()
-            
+
+
 def simulate_real_time_data():
-    """Read a batch of data from the CSV to simulate streaming"""
-    # In a real system, you would connect to Twitter API
-    # For simulation, we'll read from CSV in batches
+    """Generate realistic streaming data with random fluctuations"""
     try:
-        # Read the full dataset once
         if not hasattr(simulate_real_time_data, "full_data"):
             simulate_real_time_data.full_data = pd.read_csv("twitter_dataset.csv")
             simulate_real_time_data.index = 0
-            simulate_real_time_data.batch_size = 100  # Process 50 tweets per batch
+            simulate_real_time_data.batch_size = 200
         
-        # Get the next batch
         if simulate_real_time_data.index >= len(simulate_real_time_data.full_data):
-            simulate_real_time_data.index = 0  # Reset to beginning to simulate continuous stream
+            simulate_real_time_data.index = 0
             
         end_idx = min(simulate_real_time_data.index + simulate_real_time_data.batch_size, 
                       len(simulate_real_time_data.full_data))
         batch = simulate_real_time_data.full_data.iloc[simulate_real_time_data.index:end_idx].copy()
         simulate_real_time_data.index = end_idx
         
-        # Add some randomness to simulate real-time changes
+        # Simulate real-time fluctuations
         batch['Retweets'] = batch['Retweets'].apply(lambda x: max(0, int(x) + np.random.randint(-5, 10)))
         batch['Likes'] = batch['Likes'].apply(lambda x: max(0, int(x) + np.random.randint(-10, 20)))
-        
-        # Update timestamp to current time
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        batch['Timestamp'] = current_time
+        batch['Timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         return batch
     except Exception as e:
-        print(f"Error in simulating data: {e}")
+        print(f"Data simulation error: {e}")
         return pd.DataFrame(columns=['Tweet_ID', 'Username', 'Text', 'Retweets', 'Likes', 'Timestamp'])
 
 def process_batch():
-    """Process a batch of Twitter data"""
-    # Get simulated data
+    """Complete batch processing pipeline with monitoring"""
+    monitor.start()
+    
+    # Data ingestion
     batch_df = simulate_real_time_data()
     if batch_df.empty:
-        print("No data to process")
+        print("Empty batch - skipping")
         return
     
-    # Convert pandas DataFrame to Spark DataFrame
+    monitor.record()
+    
+    # Spark processing
     spark_df = spark.createDataFrame(batch_df)
+    with_sentiment = spark_df.withColumn("compound_score", sentiment_udf(col("Text"))) \
+                            .withColumn("sentiment", sentiment_label_udf(col("compound_score")))
     
-    # Apply sentiment analysis
-    with_sentiment = spark_df.withColumn("compound_score", sentiment_udf(spark_df["Text"])) \
-                             .withColumn("sentiment", sentiment_label_udf("compound_score"))
+    monitor.record()
     
-    # Register as a temporary view for SQL queries
+    # Data storage
     with_sentiment.createOrReplaceTempView("tweets")
-    
-    # Save processed data to PostgreSQL
     save_to_postgres(with_sentiment)
-    
-    # Execute Spark SQL Queries
     run_spark_sql_queries()
     
-    print(f"Processed batch of {batch_df.shape[0]} tweets at {datetime.now()}")
+    # Performance logging
+    metrics = monitor.get_metrics()
+    print(f"\nBatch Metrics:")
+    print(f"- Processed {batch_df.shape[0]} tweets in {metrics['execution_time']:.2f}s")
+    print(f"- CPU: avg={metrics['avg_cpu']:.1f}%, max={metrics['max_cpu']:.1f}%")
+    print(f"- Memory: avg={metrics['avg_memory']:.1f}%, max={metrics['max_memory']:.1f}%")
+    
+    store_performance_metrics(metrics, batch_df.shape[0])
 
 def save_to_postgres(df):
-    """Save the processed DataFrame to PostgreSQL"""
+    """Upsert tweet data with conflict handling"""
+    insert_query = """
+    INSERT INTO tweets (tweet_id, username, text, retweets, likes, timestamp, compound_score, sentiment)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (tweet_id) 
+    DO UPDATE SET 
+        retweets = EXCLUDED.retweets,
+        likes = EXCLUDED.likes,
+        timestamp = EXCLUDED.timestamp,
+        compound_score = EXCLUDED.compound_score,
+        sentiment = EXCLUDED.sentiment
+    """
+    
     try:
-        # Convert spark dataframe to pandas for easier insertion
-        pandas_df = df.toPandas()
-        
         conn = psycopg2.connect(**db_params)
         cursor = conn.cursor()
         
-        # Insert each row into the tweets table
-        for _, row in pandas_df.iterrows():
-            cursor.execute(
-                """
-                INSERT INTO tweets (tweet_id, username, text, retweets, likes, timestamp, compound_score, sentiment)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (tweet_id) 
-                DO UPDATE SET 
-                    retweets = EXCLUDED.retweets,
-                    likes = EXCLUDED.likes,
-                    timestamp = EXCLUDED.timestamp,
-                    compound_score = EXCLUDED.compound_score,
-                    sentiment = EXCLUDED.sentiment
-                """,
-                (
-                    row['Tweet_ID'],
-                    row['Username'],
-                    row['Text'],
-                    int(row['Retweets']),
-                    int(row['Likes']),
-                    row['Timestamp'],
-                    float(row['compound_score']),
-                    row['sentiment']
-                )
-            )
+        for row in df.collect():
+            cursor.execute(insert_query, (
+                row['Tweet_ID'],
+                row['Username'],
+                row['Text'],
+                int(row['Retweets']),
+                int(row['Likes']),
+                row['Timestamp'],
+                float(row['compound_score']),
+                row['sentiment']
+            ))
         
         conn.commit()
     except Exception as e:
-        print(f"Error saving to PostgreSQL: {e}")
+        print(f"Database write error: {e}")
     finally:
         if conn:
             conn.close()
 
 def run_spark_sql_queries():
-    """Run the three Spark SQL queries and store results in PostgreSQL"""
+    """Execute all analytical queries"""
+    batch_id = datetime.now().strftime("%Y%m%d%H%M%S")
+    
     try:
         # Query 1: Sentiment distribution
-        sentiment_distribution = spark.sql("""
+        sentiment_dist = spark.sql("""
             SELECT 
                 sentiment,
                 COUNT(*) as count,
-                COUNT(*) * 100.0 / (SELECT COUNT(*) FROM tweets) as percentage
-            FROM 
-                tweets
-            GROUP BY 
-                sentiment
-            ORDER BY 
-                count DESC
+                ROUND(COUNT(*) * 100.0 / (SELECT COUNT(*) FROM tweets), 2) as percentage
+            FROM tweets
+            GROUP BY sentiment
+            ORDER BY count DESC
         """)
         
-        # Query 2: Popular users with their sentiment analysis
+        # Query 2: Popular users
         popular_users = spark.sql("""
             SELECT 
                 Username,
-                AVG(compound_score) as avg_sentiment,
+                ROUND(AVG(compound_score), 4) as avg_sentiment,
                 COUNT(*) as total_tweets,
                 SUM(CAST(Retweets AS INT) + CAST(Likes AS INT)) as total_engagement
-            FROM 
-                tweets
-            GROUP BY 
-                Username
-            ORDER BY 
-                total_engagement DESC
+            FROM tweets
+            GROUP BY Username
+            ORDER BY total_engagement DESC
             LIMIT 10
         """)
         
-        # Query 3: Recent sentiment trends over time
-        # In a real application, you'd have actual timestamps to work with
-        sentiment_trend = spark.sql("""
+        # Query 3: Hourly trends 
+        hourly_sentiment = spark.sql("""
             SELECT 
+                CAST(DATE_TRUNC('hour', CAST(timestamp AS TIMESTAMP)) AS TIMESTAMP) as hour,
                 sentiment,
-                COUNT(*) as count
-            FROM 
-                tweets
-            GROUP BY 
-                sentiment
+                COUNT(*) as count,
+                ROUND(AVG(compound_score), 4) as avg_score
+            FROM tweets
+            GROUP BY DATE_TRUNC('hour', CAST(timestamp AS TIMESTAMP)), sentiment
+            ORDER BY hour, sentiment
         """)
         
-        # Store query results in PostgreSQL
-        store_query_results(sentiment_distribution, popular_users)
+        store_query_results(sentiment_dist, popular_users, hourly_sentiment, batch_id)
         
     except Exception as e:
-        print(f"Error in Spark SQL queries: {e}")
+        print(f"Query execution error: {e}")
 
-def store_query_results(sentiment_distribution, popular_users, hourly_sentiment=None):
-    """Store results without deleting old records"""
+def store_query_results(sentiment_dist, popular_users, hourly_sentiment, batch_id):
+    """Store all analytical results"""
+    conn = None
     try:
         conn = psycopg2.connect(**db_params)
         cursor = conn.cursor()
         
-        # Generate a unique batch ID
-        batch_id = datetime.now().strftime("%Y%m%d%H%M%S")
-        
-        # Insert sentiment distribution with batch_id
-        sentiment_df = sentiment_distribution.toPandas()
-        for _, row in sentiment_df.iterrows():
-            cursor.execute(
-                """
-                INSERT INTO sentiment_summary 
-                (batch_id, sentiment, count, percentage)
+        # Sentiment distribution
+        for row in sentiment_dist.collect():
+            cursor.execute("""
+                INSERT INTO sentiment_summary (batch_id, sentiment, count, percentage)
                 VALUES (%s, %s, %s, %s)
+                ON CONFLICT (batch_id, sentiment) DO UPDATE SET
+                    count = EXCLUDED.count,
+                    percentage = EXCLUDED.percentage
                 """,
-                (batch_id, row['sentiment'], int(row['count']), float(row['percentage']))
+                (batch_id, row['sentiment'], row['count'], row['percentage'])
             )
         
-        # Insert popular users with batch_id
-        users_df = popular_users.toPandas()
-        for _, row in users_df.iterrows():
-            cursor.execute(
-                """
-                INSERT INTO popular_users 
-                (batch_id, username, avg_sentiment, total_tweets, total_engagement)
+        # Popular users
+        for row in popular_users.collect():
+            cursor.execute("""
+                INSERT INTO popular_users (batch_id, username, avg_sentiment, total_tweets, total_engagement)
                 VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (batch_id, username) DO UPDATE SET
+                    avg_sentiment = EXCLUDED.avg_sentiment,
+                    total_tweets = EXCLUDED.total_tweets,
+                    total_engagement = EXCLUDED.total_engagement
                 """,
-                (batch_id, row['Username'], float(row['avg_sentiment']), 
-                int(row['total_tweets']), int(row['total_engagement']))
+                (batch_id, row['Username'], row['avg_sentiment'], row['total_tweets'], row['total_engagement'])
             )
         
-        # Insert hourly trends if available (from 3rd query)
-        if hourly_sentiment:
-            hourly_df = hourly_sentiment.toPandas()
-            for _, row in hourly_df.iterrows():
-                cursor.execute(
-                    """
-                    INSERT INTO hourly_sentiment 
-                    (batch_id, hour, sentiment, count, avg_score)
-                    VALUES (%s, %s, %s, %s, %s)
-                    """,
-                    (batch_id, row['hour'], row['sentiment'], 
-                     int(row['count']), float(row['avg_score']))
-                )
+        # Hourly sentiment 
+        for row in hourly_sentiment.collect():
+            cursor.execute("""
+                INSERT INTO hourly_sentiment (batch_id, hour, sentiment, count, avg_score)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (batch_id, hour, sentiment) DO UPDATE SET
+                    count = EXCLUDED.count,
+                    avg_score = EXCLUDED.avg_score
+                """,
+                (batch_id, row['hour'], row['sentiment'], row['count'], row['avg_score'])
+            )
         
         conn.commit()
     except Exception as e:
-        print(f"Error storing query results: {e}")
+        print(f"Results storage error: {e}")
     finally:
         if conn:
             conn.close()
-            
-            
+
+def store_performance_metrics(metrics, record_count):
+    """Record system performance metrics"""
+    try:
+        conn = psycopg2.connect(**db_params)
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            INSERT INTO performance_metrics (
+                batch_interval, execution_time, avg_cpu, max_cpu,
+                avg_memory, max_memory, record_count, timestamp
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (20,  # Adjust for 30-second batches when comparing
+             metrics['execution_time'],
+             metrics['avg_cpu'],
+             metrics['max_cpu'],
+             metrics['avg_memory'],
+             metrics['max_memory'],
+             record_count,
+             metrics['timestamp'])
+        )
+        
+        conn.commit()
+    except Exception as e:
+        print(f"Metrics storage error: {e}")
+    finally:
+        if conn:
+            conn.close()
+
 def main():
-    """Main function to run the Twitter sentiment analysis pipeline"""
-    print("Starting Twitter sentiment analysis pipeline...")
-    
-    # Create database tables if they don't exist
+    """Run the streaming pipeline"""
+    print("Initializing Twitter Sentiment Analysis Pipeline")
     create_tables()
     
-    # Process batches on a schedule to simulate real-time
-    schedule.every(20).seconds.do(process_batch)
-    
-    # Run the first batch immediately
+    # Process first batch immediately
     process_batch()
     
-    # Keep the script running
+    # Schedule subsequent batches
+    schedule.every(20).seconds.do(process_batch)
+    
     while True:
         schedule.run_pending()
         time.sleep(1)
