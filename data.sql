@@ -44,7 +44,6 @@ SELECT * FROM neutral;
 
 --
 
-
 SELECT * FROM   tweets ;
 
 SELECT * FROM  sentiment_summary;
