@@ -105,12 +105,27 @@ Password: your_password
 
 </details>
 
-## Terminal 1
+----
+
+### VADER Lexicon Checker for NLTK Sentiment Analysis
+```bash
+python3 vader_download.py vader_download.py
+```
+
+## Batch Processing
+
+### Terminal 1
 ```bash
 python3 consumer.py
 ```
 
-## Terminal 2
+### Terminal 2
 ```bash
 python3 producer.py
+```
+
+## Stream Processing
+
+```bash
+python3 tweet_consumer_stream.py
 ```
