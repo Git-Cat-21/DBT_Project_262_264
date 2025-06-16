@@ -1,4 +1,4 @@
-# 🐦 TweetTide: The Social Wave Pipeline 🌊
+# 🐦 TweetTide: The Social Pipeline 🌊
 
 This project implements a comprehensive data processing pipeline for Twitter data using both batch and stream processing methodologies.
 
