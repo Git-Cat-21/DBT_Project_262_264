@@ -12,7 +12,8 @@ The system leverages Apache Kafka for message queuing and Apache Spark for distr
     - **Stream Processing**: Real-time data is processed as it arrives
 3. **Implementation Note**: Since Twitter API requires payment, we simulated the streaming data by using Python's time module to add a 1-second delay between messages, creating a realistic stream simulation without actual API access
 
-
+## Workflow Diagram
+![Workflow Diagram](/assets/workflow.png)
 <details>
 <summary> How to set up Kafka?</summary>
 <br>
