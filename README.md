@@ -1,3 +1,18 @@
+# 🐦 TweetTide: The Social Wave Pipeline 🌊
+
+This project implements a comprehensive data processing pipeline for Twitter data using both batch and stream processing methodologies.
+
+## Overview
+
+The system leverages Apache Kafka for message queuing and Apache Spark for distributed data processing. The pipeline consists of:
+
+1. **Data Collection**: Twitter data is ingested into the system
+2. **Processing Pipeline**:
+    - **Batch Processing**: Historical data is processed in batches
+    - **Stream Processing**: Real-time data is processed as it arrives
+3. **Implementation Note**: Since Twitter API requires payment, we simulated the streaming data by using Python's time module to add a 1-second delay between messages, creating a realistic stream simulation without actual API access
+
+
 <details>
 <summary> How to set up Kafka?</summary>
 <br>
@@ -112,7 +127,9 @@ Password: your_password
 python3 vader_download.py vader_download.py
 ```
 
-## Batch Processing
+## Processing Modes
+
+### Batch Processing
 
 ### Terminal 1
 ```bash
@@ -124,7 +141,7 @@ python3 consumer.py
 python3 producer.py
 ```
 
-## Stream Processing
+### Stream Processing
 
 ```bash
 python3 tweet_consumer_stream.py
